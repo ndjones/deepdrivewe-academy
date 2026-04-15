@@ -284,10 +284,14 @@ class BasisStates(BaseModel):
     """Basis states for the weighted ensemble."""
 
     basis_state_dir: Path = Field(
-        description='Nested directory storing initial simulation start files, '
-        'e.g. pdb_dir/system1/, pdb_dir/system2/, ..., where system<i> might '
-        'store PDB files, topology files, etc needed to start the simulation '
-        'application.',
+        description='Directory containing one numbered subdirectory per basis '
+        'state. Each subdirectory must contain exactly one file with '
+        '``basis_state_ext``. Example layout::\n\n'
+        '    basis_state_dir/\n'
+        '        00/state.ncrst\n'
+        '        01/state.ncrst\n\n'
+        'Flat files placed directly in ``basis_state_dir/`` are not '
+        'recognised. Use ``00/``, ``01/``, … sub-directories.',
     )
     basis_state_ext: str = Field(
         default='.ncrst',
@@ -394,6 +398,17 @@ class BasisStates(BaseModel):
     def _glob_basis_states(self) -> list[Path]:
         """Load the unique basis states from the simulation input directory.
 
+        Each basis state must live in its own numbered subdirectory::
+
+            basis_state_dir/
+                00/state.ncrst   ← found
+                01/state.ncrst   ← found
+
+        Files placed directly in ``basis_state_dir/`` are *not* found::
+
+            basis_state_dir/
+                state.ncrst      ← NOT found (flat layout)
+
         Returns
         -------
         list[Path]
@@ -403,12 +418,32 @@ class BasisStates(BaseModel):
         ------
         FileNotFoundError
             If no basis state is found in the input directory.
+        ValueError
+            If basis state files are found in a flat layout (i.e., directly
+            in ``basis_state_dir/``) instead of numbered subdirectories,
+            or if no basis state files are found at all.
         """
         # Collect initial simulation directories,
         # assuming they are in nested subdirectories
         sim_input_dirs = [
             p for p in self.basis_state_dir.glob('*') if p.is_dir()
         ]
+
+        # If no subdirectories were found, check for the common mistake of
+        # placing files directly in basis_state_dir (flat layout).
+        if not sim_input_dirs:
+            flat_files = list(
+                self.basis_state_dir.glob(f'*{self.basis_state_ext}'),
+            )
+            if flat_files:
+                raise ValueError(
+                    f'Found {len(flat_files)} '
+                    f'{self.basis_state_ext!r} file(s) directly in '
+                    f'{self.basis_state_dir}, but BasisStates requires '
+                    f'each basis state in its own numbered subdirectory. '
+                    f'Expected layout: '
+                    f'{self.basis_state_dir}/00/state{self.basis_state_ext}',
+                )
 
         # Check if there are more basis states than initial ensemble members
         if (
