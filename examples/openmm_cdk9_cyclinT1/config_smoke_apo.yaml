@@ -1,0 +1,50 @@
+# Smoke test config — apo CDK9
+# 1 walker, 1 iteration, 1 ps segments, CPU, local executor.
+# NOT for production use.  Validates the workflow pipeline only.
+
+output_dir: runs/smoke-apo
+
+num_iterations: 1
+
+basis_states:
+  basis_state_dir: examples/openmm_cdk9_cyclinT1/inputs/apo
+  basis_state_ext: ".pdb"
+  initial_ensemble_members: 1
+
+basis_state_initializer:
+  reference_file: examples/openmm_cdk9_cyclinT1/inputs/apo/basis_000.pdb
+  mda_selection: "protein and name CA"
+  chain: "A"
+  glu66_resnum: 62
+  lys48_resnum: 44
+
+simulation_config:
+  openmm_config:
+    simulation_length_ns: 0.001
+    report_interval_ps: 0.5
+    dt_ps: 0.002
+    temperature_kelvin: 300.0
+    heat_bath_friction_coef: 1.0
+    solvent_type: implicit
+    run_minimization: false
+    set_positions: true
+    randomize_velocities: true
+    hardware_platform: CPU
+  reference_file: examples/openmm_cdk9_cyclinT1/inputs/apo/basis_000.pdb
+  cutoff_angstrom: 8.0
+  mda_selection: "protein and name CA"
+  openmm_selection: ["CA"]
+  glu_resnum: 62
+  lys_resnum: 44
+  chain_id: "A"
+
+inference_config:
+  rmsd_bin_edges: [0.0, 2.0, 4.0, 6.0, .inf]
+  salt_bridge_bin_edges: [0.0, 5.0, 10.0, .inf]
+  sims_per_bin: 1
+  max_allowed_weight: 1.0
+  min_allowed_weight: 1.0e-40
+  rmsd_boundary_ang: 6.0
+
+compute_config:
+  name: local
