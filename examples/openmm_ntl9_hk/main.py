@@ -80,11 +80,6 @@ async def main() -> None:
 
     init_logging('INFO', logfile=cfg.output_dir / 'runtime.log')
 
-    # Create Parsl configuration from compute config
-    parsl_config = cfg.compute_config.get_parsl_config(
-        cfg.output_dir / 'run-info',
-    )
-
     # Initialize or resume ensemble
     checkpointer = EnsembleCheckpointer(output_dir=cfg.output_dir)
     checkpoint = checkpointer.latest_checkpoint()
@@ -102,49 +97,75 @@ async def main() -> None:
     logging.info(f'Basis states: {ensemble.basis_states}')
     logging.info(f'Target states: {ensemble.target_states}')
 
-    # Create the Parsl executor outside the Manager context so we
-    # can guarantee cleanup even if the process is interrupted.
-    gpu_executor = ParslPoolExecutor(parsl_config)
+    # Common kwargs passed to run_westpa_workflow in both branches.
+    workflow_kwargs = {
+        'manager': None,  # filled in below
+        'sim_agent_type': OpenMMSimAgent,
+        'westpa_agent_type': HuberKimWestpaAgent,
+        'max_iterations': cfg.num_iterations,
+        'ensemble': ensemble,
+        'checkpointer': checkpointer,
+        'sim_agent_kwargs': {
+            'sim_config': cfg.simulation_config,
+            'output_dir': cfg.output_dir / 'simulation',
+        },
+        'westpa_agent_kwargs': {
+            'inference_config': cfg.inference_config,
+        },
+        'westpa_executor': 'cpu',
+        'logfile': cfg.output_dir / 'runtime.log',
+    }
 
-    # Handle `kill <pid>` (SIGTERM). Parsl workers survive the main
-    # process dying, and normal interpreter shutdown hangs after
-    # atexit cleans up the DFK. Using os._exit() after shutdown
-    # sidesteps the hang while still tearing down workers cleanly.
-    def _handle_sigterm(*_: object) -> None:
-        gpu_executor.shutdown(wait=False)
-        os._exit(0)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    try:
+    if args.exchange == 'local':
+        # LocalExchangeFactory uses shared in-process memory and cannot
+        # be serialised by ParslPoolExecutor (cross-process). Run agents
+        # as asyncio tasks with a CPU thread-pool executor instead.
+        # Blocking MD is offloaded to a thread inside run_simulation().
         async with await Manager.from_exchange_factory(
             factory=create_exchange_factory(args.exchange),
-            executors={
-                'gpu': gpu_executor,
-                'cpu': ThreadPoolExecutor(max_workers=1),
-            },
-            default_executor='gpu',
+            executors={'cpu': ThreadPoolExecutor(max_workers=1)},
+            default_executor='cpu',
         ) as manager:
             await run_westpa_workflow(
-                manager=manager,
-                sim_agent_type=OpenMMSimAgent,
-                westpa_agent_type=HuberKimWestpaAgent,
-                max_iterations=cfg.num_iterations,
-                ensemble=ensemble,
-                checkpointer=checkpointer,
-                sim_agent_kwargs={
-                    'sim_config': cfg.simulation_config,
-                    'output_dir': cfg.output_dir / 'simulation',
-                },
-                westpa_agent_kwargs={
-                    'inference_config': cfg.inference_config,
-                },
-                sim_executor='gpu',
-                westpa_executor='cpu',
-                logfile=cfg.output_dir / 'runtime.log',
+                **{**workflow_kwargs, 'manager': manager},
+                sim_executor='cpu',
             )
-    finally:
-        gpu_executor.shutdown(wait=False)
+    else:
+        # Cross-process exchange: dispatch simulations to GPU workers
+        # via Parsl, keep the WestpaAgent on a CPU thread.
+        parsl_config = cfg.compute_config.get_parsl_config(
+            cfg.output_dir / 'run-info',
+        )
+
+        # Create the Parsl executor outside the Manager context so we
+        # can guarantee cleanup even if the process is interrupted.
+        gpu_executor = ParslPoolExecutor(parsl_config)
+
+        # Handle `kill <pid>` (SIGTERM). Parsl workers survive the main
+        # process dying, and normal interpreter shutdown hangs after
+        # atexit cleans up the DFK. Using os._exit() after shutdown
+        # sidesteps the hang while still tearing down workers cleanly.
+        def _handle_sigterm(*_: object) -> None:
+            gpu_executor.shutdown(wait=False)
+            os._exit(0)
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
+        try:
+            async with await Manager.from_exchange_factory(
+                factory=create_exchange_factory(args.exchange),
+                executors={
+                    'gpu': gpu_executor,
+                    'cpu': ThreadPoolExecutor(max_workers=1),
+                },
+                default_executor='gpu',
+            ) as manager:
+                await run_westpa_workflow(
+                    **{**workflow_kwargs, 'manager': manager},
+                    sim_executor='gpu',
+                )
+        finally:
+            gpu_executor.shutdown(wait=False)
 
 
 if __name__ == '__main__':
